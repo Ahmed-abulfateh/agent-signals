@@ -1,105 +1,161 @@
 //+------------------------------------------------------------------+
-//|                                                      AIControl.mq5|
-//|                        Example MQL5 Expert Advisor               |
+//|              AIControl.mq5 - AI-Ready MQL5 EA                  |
 //+------------------------------------------------------------------+
 #property copyright "Your Name"
 #property link      "https://github.com/your-repo"
-#property version   "1.00"
+#property version   "2.00"
 #property strict
 
-input bool UseAITrading = false;
-input string ControlFile = "C:\\Users\\Ahmed\\Downloads\\code\\ga\\labs\\mql5-ecper-with-Ai\\control.txt";
+input string AICommandFile = "ai_command.txt";
+input string AIResultFile  = "ai_result.txt";
 
 //+------------------------------------------------------------------+
-//| Expert initialization function                                   |
+//| Expert initialization                                           |
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   Print("AIControl EA initialized");
+   Print("AIControl EA v2 initialized");
    return(INIT_SUCCEEDED);
   }
-//+------------------------------------------------------------------+
-//| Expert deinitialization function                                 |
-//+------------------------------------------------------------------+
+
 void OnDeinit(const int reason)
   {
-   Print("AIControl EA deinitialized");
+   Print("AIControl EA v2 deinitialized");
   }
-//+------------------------------------------------------------------+
-//| Expert tick function                                             |
-//+------------------------------------------------------------------+
+
 void OnTick()
   {
-   // Check for control commands from Java dashboard
-   string command = ReadControlCommand();
-   if(command != "")
-     {
-      ProcessCommand(command);
-     }
-   // AI trading mode
-   if(UseAITrading)
-     {
-      // Placeholder: Call AI agent or process AI signal
-      Print("AI trading mode active");
-     }
+   string ai_cmd = ReadAICommand();
+   if(ai_cmd != "")
+     ProcessAICommand(ai_cmd);
   }
+
 //+------------------------------------------------------------------+
-//| Read control command from file                                   |
+//| Read AI command from file                                       |
 //+------------------------------------------------------------------+
-string ReadControlCommand()
+string ReadAICommand()
   {
    string cmd = "";
-   int handle = FileOpen(ControlFile, FILE_READ|FILE_TXT);
+   int handle = FileOpen(AICommandFile, FILE_READ|FILE_TXT);
    if(handle != INVALID_HANDLE)
      {
-      if(!FileIsEnding(handle))
-         cmd = FileReadString(handle);
+      cmd = FileReadString(handle);
       FileClose(handle);
      }
    return cmd;
   }
-//+------------------------------------------------------------------+
-//| Process command from dashboard                                   |
-//+------------------------------------------------------------------+
-void ProcessCommand(string cmd)
-  {
-  if(cmd == "AI_ON")
-    UseAITrading = true;
-  else if(cmd == "AI_OFF")
-    UseAITrading = false;
-  else if(UseAITrading && (cmd == "BUY" || cmd == "SELL"))
-    {
-    ExecuteTrade(cmd);
-    }
-  // Add more commands as needed
-  Print("Processed command: ", cmd);
-  }
-//+------------------------------------------------------------------+
 
-//| Execute trade based on AI signal                                |
 //+------------------------------------------------------------------+
-void ExecuteTrade(string signal)
+//| Write result to AI result file                                  |
+//+------------------------------------------------------------------+
+void WriteAIResult(string result)
   {
-  double lotSize = 0.1; // Example lot size
-  int slippage = 3;
-  double price = 0;
-  int ticket = -1;
-  if(signal == "BUY")
-    {
-    price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    ticket = OrderSend(_Symbol, OP_BUY, lotSize, price, slippage, 0, 0, "AI BUY", 0, 0, clrGreen);
-    if(ticket > 0)
-      Print("AI BUY order sent, ticket: ", ticket);
-    else
-      Print("AI BUY order failed: ", GetLastError());
-    }
-  else if(signal == "SELL")
-    {
-    price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    ticket = OrderSend(_Symbol, OP_SELL, lotSize, price, slippage, 0, 0, "AI SELL", 0, 0, clrRed);
-    if(ticket > 0)
-      Print("AI SELL order sent, ticket: ", ticket);
-    else
-      Print("AI SELL order failed: ", GetLastError());
-    }
+   int handle = FileOpen(AIResultFile, FILE_WRITE|FILE_TXT);
+   if(handle != INVALID_HANDLE)
+     {
+      FileWrite(handle, result);
+      FileClose(handle);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Process AI command                                              |
+//+------------------------------------------------------------------+
+void ProcessAICommand(string cmd)
+  {
+   if(cmd=="BUY" || cmd=="SELL")
+     {
+      bool ok = ExecuteTrade(cmd);
+      WriteAIResult(ok ? "TRADE_OK" : "TRADE_FAIL");
+     }
+   else if(StringFind(cmd, "CLOSE:") == 0)
+     {
+      ulong ticket = (ulong)StringToInteger(StringSubstr(cmd,6));
+      bool ok = CloseTrade(ticket);
+      WriteAIResult(ok ? "CLOSE_OK" : "CLOSE_FAIL");
+     }
+   else if(cmd=="GET_BALANCE")
+     WriteAIResult(DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2));
+   else if(cmd=="GET_EQUITY")
+     WriteAIResult(DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2));
+   else if(cmd=="GET_TRADES")
+     WriteOpenTrades();
+   else
+     WriteAIResult("UNKNOWN_CMD");
+  }
+
+//+------------------------------------------------------------------+
+//| Execute trade (BUY/SELL)                                        |
+//+------------------------------------------------------------------+
+bool ExecuteTrade(string signal)
+  {
+   double lot = 0.1;
+   double price = (signal=="BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int type = (signal=="BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   MqlTradeRequest req;
+   MqlTradeResult res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+   req.action = TRADE_ACTION_DEAL;
+   req.symbol = _Symbol;
+   req.volume = lot;
+   req.type = type;
+   req.price = price;
+   req.deviation = 3;
+   req.magic = 2026;
+   req.type_filling = ORDER_FILLING_IOC;
+   req.type_time = ORDER_TIME_GTC;
+   req.comment = "AI TRADE";
+   bool ok = OrderSend(req, res);
+   return ok && (res.retcode==10009 || res.retcode==10008);
+  }
+
+//+------------------------------------------------------------------+
+//| Close trade by ticket                                           |
+//+------------------------------------------------------------------+
+bool CloseTrade(ulong ticket)
+  {
+   if(!PositionSelectByTicket(ticket)) return false;
+   string symbol = PositionGetString(POSITION_SYMBOL);
+   double lots = PositionGetDouble(POSITION_VOLUME);
+   int type = PositionGetInteger(POSITION_TYPE);
+   double price = (type==POSITION_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_BID) : SymbolInfoDouble(symbol, SYMBOL_ASK);
+   MqlTradeRequest req;
+   MqlTradeResult res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+   req.action = TRADE_ACTION_DEAL;
+   req.symbol = symbol;
+   req.volume = lots;
+   req.position = ticket;
+   req.deviation = 3;
+   req.magic = 2026;
+   req.type = (type==POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   req.price = price;
+   req.type_filling = ORDER_FILLING_IOC;
+   req.type_time = ORDER_TIME_GTC;
+   req.comment = "AI CLOSE";
+   bool ok = OrderSend(req, res);
+   return ok && (res.retcode==10009 || res.retcode==10008);
+  }
+
+//+------------------------------------------------------------------+
+//| Write open trades info to AI result file                        |
+//+------------------------------------------------------------------+
+void WriteOpenTrades()
+  {
+   int handle = FileOpen(AIResultFile, FILE_WRITE|FILE_TXT);
+   if(handle != INVALID_HANDLE)
+     {
+      for(int i=0; i<PositionsTotal(); i++)
+        {
+         ulong ticket = PositionGetTicket(i);
+         string symbol = PositionGetString(POSITION_SYMBOL);
+         double lots = PositionGetDouble(POSITION_VOLUME);
+         double price = PositionGetDouble(POSITION_PRICE_OPEN);
+         string type = (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY) ? "BUY" : "SELL";
+         FileWrite(handle, ticket, symbol, type, DoubleToString(lots,2), DoubleToString(price,2));
+        }
+      FileClose(handle);
+     }
   }
